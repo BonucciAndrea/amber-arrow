@@ -1,0 +1,16 @@
+# Keep line endings deterministic across platforms. In particular, build.sh and
+# any shell script MUST stay LF: a CRLF shebang (`#!/usr/bin/env bash\r`) makes
+# the kernel look for an interpreter literally named "bash\r", which fails on
+# every Unix and under WSL on a Windows checkout.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+*.py   text eol=lf
+*.k    text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+
+*.so   binary
+*.dylib binary

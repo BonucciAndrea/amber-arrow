@@ -83,8 +83,42 @@ pip install ./python                                      # amber_arrow + amber_
 pip install ../python-amber                               # for the embedded backend
 ```
 
-`build.sh` finds the engine at `$AMBER_SRC` (default `../amber`) or a prebuilt
-library at `$AMBER_LIB_DIR`, and builds it if it has to.
+### Pointing the build at the engine
+
+`build.sh` produces `build/libamber_arrow.so` (and, with `--amberd`,
+`build/amberd`). Both link `libamber.so` and nothing else, so the one thing the
+build needs is to find that library:
+
+| variable | meaning | default |
+|---|---|---|
+| `AMBER_SRC` | an engine **checkout** — `build.sh` will build `libamber.so` here if it is missing | `../amber` |
+| `AMBER_LIB_DIR` | a directory that already contains a **prebuilt** `libamber.so`/`.dylib` | `$AMBER_SRC` |
+
+So with a prebuilt engine already on disk, point `build.sh` straight at it and
+nothing is compiled twice:
+
+```bash
+AMBER_LIB_DIR=/opt/amber ./build.sh --amberd              # use a prebuilt libamber.so
+```
+
+The resulting objects carry an `-rpath` to that directory, so they load the
+engine without `LD_LIBRARY_PATH` being set.
+
+### Running against the standard library
+
+`AMBER_SRC`/`AMBER_LIB_DIR` are **build-time** and locate the shared library.
+At **run time**, `amberd`, `amber-flight` and the test suite need the `.k`
+standard-library modules (`amber.k`, `qsql.k`, `fin.k`, …). Point them at that
+directory with `--home DIR` or the `$AMBER_HOME` environment variable — usually
+the same engine checkout:
+
+```bash
+export AMBER_HOME=/opt/amber        # the directory holding amber.k, qsql.k, ...
+./build/amberd --home "$AMBER_HOME" --port 5010 --eval "gentq 10000000" -v
+```
+
+Without a home directory the engine still runs, but as a **bare engine**:
+primitives only, no qSQL and no `gentq`.
 
 ### One engine, not two
 
@@ -163,7 +197,7 @@ followed by exactly that many bytes:
 |---|---|
 | `\mode text\|json\|jsonc\|raw` | set the reply encoding |
 | `\ping` | → `pong` |
-| `\version` | → `1.9.6` |
+| `\version` | → `2.0.0` |
 | `\quit` | close |
 | anything else | evaluate it — bare qSQL included |
 
@@ -255,11 +289,19 @@ concatenation — not an attacker. The real boundary is not exposing the port.
 ## Tests
 
 ```bash
-./build.sh --amberd
+./build.sh --amberd                 # builds build/libamber_arrow.so + build/amberd
+export AMBER_HOME=/opt/amber         # the .k standard library (see "Running", above)
+pip install ./python                 # amber_arrow + amber_flight, into a venv
+pip install ../python-amber          # the embedded backend the tests stream through
 python -m pytest tests -q
 ```
 
-31 tests, covering: that every batch shares one buffer address and that the
+The tests need `python-amber` and `pyarrow` importable and `$AMBER_HOME` set;
+each fixture `importorskip`s what it cannot find, so a partial install skips
+rather than fails. If `libamber_arrow.so` is somewhere other than `build/`, point
+`$AMBER_ARROW_LIB` at it.
+
+34 tests, covering: that every batch shares one buffer address and that the
 address is the engine's; that a batch survives its stream's release; that the
 schema handed to a consumer is independent of the stream; the full `amberd`
 protocol against a real server on a real socket, including that two connections

@@ -13,7 +13,10 @@ def client(flight_server):
 
 
 def test_version_action(client):
-    assert next(client.do_action(fl.Action("version", b""))).body.to_pybytes().decode().startswith("1.")
+    version = next(client.do_action(fl.Action("version", b""))).body.to_pybytes().decode()
+    # A dotted version like "2.0.0"; not pinned to a major so it survives an
+    # engine version bump.
+    assert version[:1].isdigit() and "." in version
 
 
 def test_tables_action(client):

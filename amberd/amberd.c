@@ -36,7 +36,7 @@
  *   \mode text|json|jsonc|raw   set the reply encoding      -> +2\nok
  *   \parse <expr>               syntax-check, do NOT evaluate -> +2\nok
  *   \ping                       liveness                    -> +4\npong
- *   \version                    engine version              -> +5\n1.9.6
+ *   \version                    engine version              -> +5\n2.0.0
  *   \quit                       close the connection
  *   <expression>                evaluate
  *

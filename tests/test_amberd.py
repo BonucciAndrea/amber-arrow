@@ -13,7 +13,10 @@ def client(amberd):
 
 def test_ping_and_version(client):
     assert client.ping()
-    assert client.version().startswith("1.")
+    version = client.version()
+    # A dotted version like "2.0.0"; do not pin the major, so this keeps passing
+    # across engine releases (the version is whatever amber_version_string reports).
+    assert version[:1].isdigit() and "." in version
 
 
 def test_text_mode(client):

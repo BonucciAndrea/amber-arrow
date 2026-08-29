@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "amber-arrow"
-version = "1.9.6"
+version = "2.0.0"
 description = "Streaming Apache Arrow and Arrow Flight over the Amber columnar time-series engine"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,9 +26,9 @@ classifiers = [
 dependencies = ["pyarrow>=12"]
 
 [project.optional-dependencies]
-embedded = ["amber>=1.9.6"]           # the in-process, zero-copy backend
+embedded = ["amber>=2.0.0"]           # the in-process, zero-copy backend
 pandas   = ["pandas>=1.3"]
-dev      = ["pytest>=7", "amber>=1.9.6", "pandas>=1.3"]
+dev      = ["pytest>=7", "amber>=2.0.0", "pandas>=1.3"]
 
 [project.scripts]
 amber-flight = "amber_flight.__main__:main"

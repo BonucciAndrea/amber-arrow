@@ -1,10 +1,10 @@
 # Changelog
 
-## 1.9.6 — first release
+## 2.0.0 — first release
 
 Streaming Apache Arrow over the Amber engine, the `amberd` query server, and an Arrow Flight daemon.
 
-Tracks Amber engine release 1.9.6, which added the `libamber.so` dynamic C API
+Tracks Amber engine release 2.0.0, which added the `libamber.so` dynamic C API
 this package is built on. Everything here lives outside the engine repository and
 reaches it only through that documented seam.
 
