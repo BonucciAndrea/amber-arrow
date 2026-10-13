@@ -33,9 +33,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Engine (for amberd)
-        run: cd engine && mkdir -p o && ./build.sh --shared-only
+        run: cd engine && mkdir -p o && bash build.sh --shared-only
       - name: Build
-        run: AMBER_SRC=engine ./build.sh --amberd
+        run: AMBER_SRC=engine bash build.sh --amberd
       - name: Rebuild the library with ASan + UBSan
         if: matrix.asan
         run: |
