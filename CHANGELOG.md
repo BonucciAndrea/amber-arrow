@@ -17,7 +17,8 @@
   more, a client that stops reading gets dropped after 30 s instead of stalling everyone, `--load` goes through
   the real loader (`.q`, multi-line qSQL, CRLF), and bad ports and addresses fail at startup.
 - **amber-flight**: the same read-only rule as amberd, engine errors come back with their text, upload names are
-  checked, and concurrent clients are serialised around the engine.
+  checked, and the engine runs on one thread of its own with a 64 MB stack. gRPC's threads get 512 KB on macOS,
+  and the server died on its first real query there.
 - 132 tests, up from 34.
 
 ## 2.0.0 — first release

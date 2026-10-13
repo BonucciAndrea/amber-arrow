@@ -123,3 +123,16 @@ def test_concurrent_gets(client, flight_server):
     for t in ths:
         t.join()
     assert not errs and out == [20_000] * 8
+
+
+
+def test_engine_runs_on_a_thread_with_a_real_stack():
+    """gRPC's own threads get 512 KB on macOS; the engine runs on one of ours."""
+    from amber_flight.server import ENGINE_STACK, _EngineThread
+    import threading
+    e = _EngineThread()
+    assert e.run(lambda: threading.current_thread().name) == "amber-engine"
+    assert e.run(lambda: e.run(lambda: 41) + 1) == 42          # nested: no deadlock
+    with pytest.raises(ZeroDivisionError):
+        e.run(lambda: 1 / 0)
+    assert ENGINE_STACK >= 16 << 20
