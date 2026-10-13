@@ -54,7 +54,20 @@ enum {
     AMBER_T_SYM_ATOM   = 17,
     AMBER_T_DATE       = 26,
     AMBER_T_TIME       = 27,
-    AMBER_T_TIMESTAMP  = 28
+    AMBER_T_TIMESTAMP  = 28,
+    AMBER_T_MINUTE     = 29,   /* minutes of day (2.9)              */
+    AMBER_T_SECOND     = 30,   /* seconds of day (2.9)              */
+    AMBER_T_MONTH      = 31,   /* months since 2000.01 (2.9)        */
+    AMBER_T_TIMESPAN   = 32,   /* nanoseconds (2.9)                 */
+    /* 2.9: a list of one temporal kind is its own vector type, held as its numbers
+     * (int32, or int64 for timestamps and timespans) */
+    AMBER_T_DATE_LIST      = 33,
+    AMBER_T_TIME_LIST      = 34,
+    AMBER_T_TIMESTAMP_LIST = 35,
+    AMBER_T_MINUTE_LIST    = 36,
+    AMBER_T_SECOND_LIST    = 37,
+    AMBER_T_MONTH_LIST     = 38,
+    AMBER_T_TIMESPAN_LIST  = 39
 };
 
 /* identity */

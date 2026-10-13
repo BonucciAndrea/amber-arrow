@@ -31,6 +31,33 @@ import socket
 from typing import Any
 
 
+_MUTATING = ("::", "delete ", "update ", 'upd"', 'del"', "hdel", "insert", "upsert",
+             " set ", "`set", ".Q.dpft", "system", "\\\\")
+
+
+def looks_like_mutation(text: str) -> bool:
+    """amberd's --readonly rule, for Python servers: a best-effort guard against
+    ACCIDENTS (a typo in a dashboard), not a security boundary -- Amber can
+    assign through `.` without any of these tokens appearing.
+
+    A mutating token anywhere, or `name:` at the start of a statement. Inside a
+    statement `name:` names a column (`select vwap:wavg[sz;px] from t`) and is
+    fine."""
+    if any(tok in text for tok in _MUTATING):
+        return True
+    for stmt in text.split(";"):
+        cut = min([i for i in (stmt.find('"'), stmt.find("{")) if i >= 0], default=len(stmt))
+        head = stmt[:cut].lstrip(" \t")
+        name = 0
+        while name < len(head) and (head[name].isalnum() or head[name] == "."):
+            name += 1
+        if name and name < len(head) and head[name] == ":" and head[name + 1:name + 2] != ":":
+            return True
+        if cut < len(stmt):
+            break
+    return False
+
+
 class AmberRemoteError(RuntimeError):
     """The server evaluated the request and the engine raised."""
 

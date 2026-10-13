@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ENGINE_REF: v2.9.0
+
+jobs:
+  test:
+    name: ${{ matrix.os }}${{ matrix.asan && ' / asan' || '' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: ubuntu-latest
+            asan: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: BonucciAndrea/amber
+          ref: ${{ env.ENGINE_REF }}
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Engine (for amberd)
+        run: cd engine && mkdir -p o && ./build.sh --shared-only
+      - name: Build
+        run: AMBER_SRC=engine ./build.sh --amberd
+      - name: Rebuild the library with ASan + UBSan
+        if: matrix.asan
+        run: |
+          cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=gnu99 -Iinclude -fPIC -pthread \
+             -shared -o build/libamber_arrow.so src/amber_arrow.c -lm
+      - name: Python side (the embedded engine comes from PyPI)
+        run: python -m pip install amber-lang pyarrow pandas polars pytest ./python
+      - name: Tests
+        run: |
+          export AMBER_HOME=$(python -c "import amber; amber.init(); print(amber.home())")
+          if [ "${{ matrix.asan }}" = "true" ]; then
+            export LD_PRELOAD="$(cc -print-file-name=libasan.so) $(cc -print-file-name=libubsan.so)"
+            export ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+            python -m pytest tests/test_types.py tests/test_lifetime.py tests/test_stream.py -q -p no:cacheprovider
+          else
+            python -m pytest tests -q -p no:cacheprovider
+          fi

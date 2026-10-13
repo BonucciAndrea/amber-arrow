@@ -30,7 +30,9 @@ the security note in the README before binding anything but loopback.
 
 from __future__ import annotations
 
+import re
 import sys
+import threading
 from typing import Iterable
 
 try:
@@ -46,6 +48,8 @@ except ImportError as exc:                                  # pragma: no cover
 
 DEFAULT_BATCH = 1 << 20      # 1M rows: gRPC message overhead disappears here
 
+_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*$")
+
 
 class AmberFlightServer(flight.FlightServerBase):
     """Serve Amber query results as Arrow Flight streams."""
@@ -58,6 +62,11 @@ class AmberFlightServer(flight.FlightServerBase):
         self.batch_rows = batch_rows
         self.readonly = readonly
         self.remote = remote
+        # gRPC serves calls on a pool of threads. Each engine call is safe under
+        # the GIL on its own, but a query is several of them (evaluate, lay out,
+        # export) and the remote client is one socket: one at a time. Streaming
+        # the batches out needs no lock -- they never touch the engine.
+        self._lock = threading.RLock()
         self._client = None
         self._am = None
         self._aa = None
@@ -103,6 +112,7 @@ class AmberFlightServer(flight.FlightServerBase):
 
     def get_flight_info(self, context, descriptor):
         query = self._descriptor_query(descriptor)
+        self._guard(query)
         reader = self._reader(query, batch_rows=0, limit=0)
         schema = reader.schema
         endpoint = flight.FlightEndpoint(query.encode(), [flight.Location(self.location_str)])
@@ -131,8 +141,13 @@ class AmberFlightServer(flight.FlightServerBase):
         if self.remote:
             raise flight.FlightUnavailableError("do_put needs the embedded backend")
         name = self._descriptor_query(descriptor)
-        table = self._aa.arrow_to_table(reader.read_all())
-        self._am.set(name, table.value)
+        if not _NAME.match(name):
+            raise flight.FlightServerError(f"amber-flight: {name!r} is not an Amber global name "
+                                           "(letters and digits, dotted; no underscores)")
+        data = reader.read_all()
+        with self._lock:
+            table = self._error(lambda: self._aa.arrow_to_table(data))
+            self._am.set(name, table.value)
         print(f"amber-flight: put {len(table):,} rows -> `{name}", file=sys.stderr)
 
     def do_action(self, context, action):
@@ -146,10 +161,8 @@ class AmberFlightServer(flight.FlightServerBase):
         if kind == "eval":
             statement = action.body.to_pybytes().decode()
             self._guard(statement)
-            if self._am:
-                self._am.q(statement)
-            else:
-                self._client.text(statement)
+            with self._lock:
+                self._error(lambda: self._am.q(statement) if self._am else self._client.text(statement))
             return [flight.Result(b"ok")]
         raise flight.FlightUnavailableError(f"unknown action {kind!r}")
 
@@ -161,9 +174,20 @@ class AmberFlightServer(flight.FlightServerBase):
     # ---- internals -------------------------------------------------------
 
     def _guard(self, query: str) -> None:
-        if self.readonly and any(tok in query for tok in ("::", "delete ", "upd\"", "del\"")):
+        from amber_arrow.client import looks_like_mutation  # noqa: PLC0415
+        if self.readonly and looks_like_mutation(query):
             raise flight.FlightUnauthorizedError(
                 "this amber-flight is --readonly and the request looks like a mutation")
+
+    @staticmethod
+    def _error(fn):
+        """Run fn; an engine error goes back to the client as its own text."""
+        try:
+            return fn()
+        except flight.FlightError:
+            raise
+        except Exception as exc:                           # noqa: BLE001
+            raise flight.FlightServerError(str(exc)) from exc
 
     @staticmethod
     def _descriptor_query(descriptor) -> str:
@@ -172,6 +196,10 @@ class AmberFlightServer(flight.FlightServerBase):
         return "/".join(p.decode() if isinstance(p, bytes) else str(p) for p in descriptor.path)
 
     def _tables(self) -> list[str]:
+        with self._lock:
+            return self._tables_locked()
+
+    def _tables_locked(self) -> list[str]:
         if self._am:
             names = self._am.eval("!`")
             out = []
@@ -189,7 +217,8 @@ class AmberFlightServer(flight.FlightServerBase):
 
     def _rowcount(self, name: str) -> int:
         try:
-            return int(self._am.eval(f"#{name}")) if self._am else -1
+            with self._lock:
+                return int(self._am.eval(f"#{name}")) if self._am else -1
         except Exception:                                   # noqa: BLE001
             return -1
 
@@ -198,10 +227,10 @@ class AmberFlightServer(flight.FlightServerBase):
 
     def _reader(self, query: str, batch_rows: int, limit: int | None = None):
         """A RecordBatchReader for `query`, from whichever backend is configured."""
-        if self._aa:
-            text = query if limit is None else f"{limit}#({query})" if limit else f"0#({query})"
-            return self._aa.query(text, batch_rows=batch_rows)
-        # remote: columnar JSON over the amberd wire, then one conversion
         text = query if limit is None else f"{limit}#({query})" if limit else f"0#({query})"
-        table = pa.table(self._client.columns(text))
+        with self._lock:
+            if self._aa:
+                return self._error(lambda: self._aa.query(text, batch_rows=batch_rows))
+            # remote: columnar JSON over the amberd wire, then one conversion
+            table = pa.table(self._error(lambda: self._client.columns(text)))
         return table.to_reader(max_chunksize=batch_rows or DEFAULT_BATCH)

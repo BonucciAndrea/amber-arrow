@@ -71,3 +71,55 @@ def test_eval_action(client):
 def test_a_bad_query_is_an_error_not_a_hang(client):
     with pytest.raises(Exception):
         client.do_get(fl.Ticket(b"noSuchGlobalAtAll+1")).read_all()
+
+
+def test_temporal_columns_stream(client):
+    t = client.do_get(fl.Ticket(b"([]d:2026.01.01 0Nd;p:2026.01.01D09:30 0Np;n:0D01:00 0Nn)")).read_all()
+    assert [f.type for f in t.schema] == [pa.date32(), pa.timestamp("ns"), pa.duration("ns")]
+    assert t.column("d").null_count == 1
+
+
+def test_do_put_temporal_and_strings(client):
+    import datetime as dt
+    up = pa.table({"d": pa.array([dt.date(2026, 1, 2)], pa.date32()),
+                   "s": pa.array(["x"]).dictionary_encode(),
+                   "i": pa.array([7], pa.int8())})
+    writer, _ = client.do_put(fl.FlightDescriptor.for_path("putTemporal"), up.schema)
+    writer.write_table(up)
+    writer.close()
+    back = client.do_get(fl.Ticket(b"select from putTemporal")).read_all()
+    assert back.column("d").to_pylist() == [dt.date(2026, 1, 2)]
+    assert back.column("s").to_pylist() == ["x"] and back.column("i").to_pylist() == [7]
+
+
+def test_do_put_refuses_a_bad_name(client):
+    up = pa.table({"a": [1]})
+    with pytest.raises(fl.FlightError):
+        writer, _ = client.do_put(fl.FlightDescriptor.for_path("bad name;x:1"), up.schema)
+        writer.write_table(up)
+        writer.close()
+
+
+def test_engine_errors_carry_their_text(client):
+    with pytest.raises(fl.FlightError, match="noSuchGlobalAtAll"):
+        client.do_get(fl.Ticket(b"noSuchGlobalAtAll+1")).read_all()
+
+
+def test_concurrent_gets(client, flight_server):
+    import threading
+    out, errs = [], []
+
+    def get():
+        try:
+            c = fl.connect(flight_server)
+            out.append(c.do_get(fl.Ticket(b"select from trades")).read_all().num_rows)
+            c.close()
+        except Exception as e:                       # noqa: BLE001
+            errs.append(e)
+
+    ths = [threading.Thread(target=get) for _ in range(8)]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    assert not errs and out == [20_000] * 8

@@ -32,7 +32,7 @@ from pathlib import Path
 
 __all__ = [
     "query", "stream", "table_to_arrow", "arrow_to_table",
-    "ArrowArrayStream", "DEFAULT_BATCH", "AmberArrowError", "library_path",
+    "ArrowArrayStream", "DEFAULT_BATCH", "AmberArrowError", "library_path", "collect",
 ]
 
 DEFAULT_BATCH = 65536
@@ -100,11 +100,20 @@ _lib_path: str | None = None
 
 
 def _engine_library() -> str | None:
-    """The libamber the ``amber`` package is already using, if it is installed."""
+    """The libamber the ``amber`` package is RUNNING, if it is installed.
+
+    Asked of the loader (``library_path()``, python-amber 2.9+), not guessed from
+    the package directory: auditwheel and delocate rename and move the library
+    when they repair a wheel, so ``amber/libamber.so`` can be a copy nobody uses.
+    """
     try:
         import amber  # noqa: PLC0415
+        from amber import _amber  # noqa: PLC0415
     except ImportError:
         return None
+    path = getattr(_amber, "library_path", lambda: None)()
+    if path and os.path.isfile(path):
+        return path
     candidate = Path(amber.__file__).parent / f"libamber.{_SOEXT}"
     return str(candidate) if candidate.is_file() else None
 
@@ -168,7 +177,23 @@ def _load():
     _lib.amber_arrow_import_table.restype = ctypes.c_uint64
     _lib.amber_arrow_import_stream.argtypes = [ctypes.c_void_p]
     _lib.amber_arrow_import_stream.restype = ctypes.c_uint64
+    if hasattr(_lib, "amber_arrow_collect"):
+        _lib.amber_arrow_collect.restype = ctypes.c_long
+        _lib.amber_arrow_set_deferred.argtypes = [ctypes.c_int]
+        # In Python the engine's lock is the GIL, not a thread: PyArrow and gRPC
+        # release batches from any thread, without it. Giving an export's memory
+        # back to the engine therefore always waits for the next call here.
+        _lib.amber_arrow_set_deferred(1)
     return _lib
+
+
+def collect() -> int:
+    """Give the memory of fully released exports back to the engine now.
+
+    Every function here does this first anyway; call it after dropping a large
+    stream when nothing else will touch amber-arrow for a while."""
+    lib = _load()
+    return int(lib.amber_arrow_collect()) if hasattr(lib, "amber_arrow_collect") else 0
 
 
 def library_path() -> str:
@@ -192,6 +217,12 @@ def _reader_from(stream_struct: ArrowArrayStream):
     return pa.RecordBatchReader._import_from_c(ctypes.addressof(stream_struct))
 
 
+def _rows(batch_rows) -> int:
+    if isinstance(batch_rows, bool) or not isinstance(batch_rows, int) or batch_rows < 0:
+        raise ValueError(f"amber-arrow: batch_rows must be an int >= 0 (0: the default), not {batch_rows!r}")
+    return batch_rows
+
+
 def stream(table, batch_rows: int = 0):
     """A ``pyarrow.RecordBatchReader`` over an Amber table.
 
@@ -202,7 +233,7 @@ def stream(table, batch_rows: int = 0):
     handle = _handle_of(table)
     out = ArrowArrayStream()
     if lib.amber_arrow_stream_table(ctypes.c_uint64(handle),
-                                    ctypes.c_longlong(batch_rows),
+                                    ctypes.c_longlong(_rows(batch_rows)),
                                     ctypes.byref(out)) != 0:
         raise _fail()
     return _reader_from(out)
@@ -215,10 +246,14 @@ def query(text: str, batch_rows: int = 0):
     columns in front: Arrow has no keyed table, and dropping the keys would be
     worse than flattening them.
     """
+    if not isinstance(text, str):
+        raise TypeError(f"amber-arrow: query text must be str, not {type(text).__name__}")
+    if "\0" in text:
+        raise ValueError("amber-arrow: query text cannot hold a NUL")
     lib = _load()
     out = ArrowArrayStream()
     if lib.amber_arrow_stream_query(text.encode(),
-                                    ctypes.c_longlong(batch_rows),
+                                    ctypes.c_longlong(_rows(batch_rows)),
                                     ctypes.byref(out)) != 0:
         raise _fail()
     return _reader_from(out)
@@ -247,19 +282,28 @@ def arrow_to_table(source):
     import pyarrow as pa  # noqa: PLC0415
     lib = _load()
 
-    if isinstance(source, pa.RecordBatchReader):
-        holder = ArrowArrayStream()
-        source._export_to_c(ctypes.addressof(holder))
-        handle = lib.amber_arrow_import_stream(ctypes.byref(holder))
-    else:
-        if isinstance(source, pa.Table):
-            batches = source.combine_chunks().to_batches()
-            if not batches:
-                raise ValueError("amber-arrow: table has no record batches")
-            source = batches[0]
+    if isinstance(source, pa.RecordBatch):
         schema, array = ArrowSchema(), ArrowArray()
         source._export_to_c(ctypes.addressof(array), ctypes.addressof(schema))
         handle = lib.amber_arrow_import_table(ctypes.byref(schema), ctypes.byref(array))
+    else:
+        if isinstance(source, pa.Table):            # every chunk, and an empty table too
+            source = pa.RecordBatchReader.from_batches(source.schema, source.to_batches())
+        elif not isinstance(source, pa.RecordBatchReader):
+            if hasattr(source, "__arrow_c_stream__"):   # Polars, DuckDB, nanoarrow, ...
+                source = pa.RecordBatchReader.from_stream(source)
+            elif type(source).__module__.startswith("pandas"):
+                source = pa.Table.from_pandas(source, preserve_index=False).to_reader()
+            else:
+                raise TypeError("amber-arrow: expected a pyarrow Table, RecordBatch or RecordBatchReader, "
+                                f"or an object with __arrow_c_stream__, not {type(source).__name__}")
+        holder = ArrowArrayStream()
+        source._export_to_c(ctypes.addressof(holder))
+        try:
+            handle = lib.amber_arrow_import_stream(ctypes.byref(holder))
+        finally:
+            if holder.release:
+                holder.release(ctypes.byref(holder))
     if not handle:
         raise _fail()
     return amber.Table(_wrap_handle(handle))
@@ -291,6 +335,8 @@ def _wrap_handle(handle: int):
     """
     import amber  # noqa: PLC0415
     from amber import _amber  # noqa: PLC0415
+    if hasattr(_amber, "adopt"):                    # python-amber 2.9+
+        return _amber.adopt(handle)
     engine = ctypes.CDLL(_engine_library() or "libamber.so", mode=ctypes.RTLD_GLOBAL)
     engine.amber_set_global.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
     engine.amber_set_global.restype = ctypes.c_int

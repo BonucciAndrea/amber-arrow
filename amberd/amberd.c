@@ -92,6 +92,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -192,18 +193,23 @@ static int isalnum_(unsigned char c) {
 }
 
 static int looks_like_mutation(const char *line) {
-    static const char *TOKENS[] = { "::", "delete ", "upd\"", "del\"", "hdel", "\\\\", 0 };
-    const char *scan;
+    static const char *TOKENS[] = { "::", "delete ", "update ", "upd\"", "del\"", "hdel", "insert",
+                                    "upsert", " set ", "`set", ".Q.dpft", "system", "\\\\", 0 };
+    const char *scan, *stmt = line;
     int i;
     for (i = 0; TOKENS[i]; i++) if (strstr(line, TOKENS[i])) return 1;
-    /* a bare `name:` assignment at the start of the line */
+    /* `name:` at the START of a statement is an assignment. Inside one it is not:
+     * `select vwap:wavg[sz;px] from t` names a column, and was refused */
     for (scan = line; *scan; scan++) {
-        if (*scan == ':' && scan > line && scan[1] != ':' && scan[-1] != ':') {
-            const char *back = scan - 1;
-            while (back > line && (isalnum_((unsigned char)*back) || *back == '.')) back--;
-            if (back == line || *back == ' ' || *back == ';') return 1;
-        }
+        if (*scan == ';') { stmt = scan + 1; continue; }
         if (*scan == '"' || *scan == '{') break;   /* stop at the first literal */
+        if (*scan == ':' && scan > stmt && scan[1] != ':' && scan[-1] != ':') {
+            const char *name = scan;
+            while (name > stmt && (isalnum_((unsigned char)name[-1]) || name[-1] == '.')) name--;
+            if (name == scan) continue;                /* no name before the colon */
+            while (name > stmt && (name[-1] == ' ' || name[-1] == '\t')) name--;
+            if (name == stmt) return 1;                /* only blanks before the name */
+        }
     }
     return 0;
 }
@@ -225,7 +231,7 @@ static int looks_like_mutation(const char *line) {
  * to a FILE* or to a language runtime's stdout object.
  */
 static int handle_parse(Client *c, const char *expr) {
-    char escaped[REQ_MAX / 4];
+    char *escaped;
     char *source;
     size_t n = strlen(expr), i, j = 0;
     FILE *sink;
@@ -234,8 +240,10 @@ static int handle_parse(Client *c, const char *expr) {
     char captured[4096];
     size_t got;
 
-    if (n * 2 + 32 >= sizeof escaped)
+    if (n * 2 + 32 >= REQ_MAX / 4)
         return reply_str(c, 0, "'limit: expression too long to syntax-check");
+    escaped = (char *)malloc(n * 2 + 1);           /* was 256 KB of stack */
+    if (!escaped) return reply_str(c, 0, "'limit: out of memory");
     for (i = 0; i < n; i++) {
         if (expr[i] == '\\' || expr[i] == '"') escaped[j++] = '\\';
         escaped[j++] = expr[i];
@@ -243,8 +251,9 @@ static int handle_parse(Client *c, const char *expr) {
     escaped[j] = 0;
 
     source = (char *)malloc(j + 32);
-    if (!source) return reply_str(c, 0, "'limit: out of memory");
+    if (!source) { free(escaped); return reply_str(c, 0, "'limit: out of memory"); }
     snprintf(source, j + 32, ". \"\\\\ast %s\"", escaped);
+    free(escaped);
 
     sink = tmpfile();
     if (!sink) { free(source); return reply_str(c, 0, "'io: could not open a capture buffer"); }
@@ -353,9 +362,10 @@ static int client_feed(int index) {
 
     if (got <= 0) return -1;
     if (c->len + (size_t)got + 1 > c->cap) {
-        size_t want = (c->len + (size_t)got + 1) * 2;
+        size_t need = c->len + (size_t)got + 1, want = need * 2;
         char *grown;
-        if (want > REQ_MAX) {
+        if (want > REQ_MAX + 1) want = REQ_MAX + 1;   /* doubling past the limit refused a 600 KB line */
+        if (need > REQ_MAX + 1) {
             reply_str(c, 0, "'limit: request exceeds the 1 MiB line limit");
             return -1;
         }
@@ -424,7 +434,11 @@ int main(int argc, char **argv) {
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         #define NEXT() (i + 1 < argc ? argv[++i] : (usage(), exit(2), ""))
-        if      (!strcmp(a, "-p") || !strcmp(a, "--port")) port = atoi(NEXT());
+        if      (!strcmp(a, "-p") || !strcmp(a, "--port")) {
+            const char *v = NEXT(); char *end = 0; long pv = strtol(v, &end, 10);
+            if (!*v || *end || pv < 1 || pv > 65535) { fprintf(stderr, "amberd: bad port '%s'\n", v); return 2; }
+            port = (int)pv;
+        }
         else if (!strcmp(a, "-b") || !strcmp(a, "--bind")) bind_addr = NEXT();
         else if (!strcmp(a, "-H") || !strcmp(a, "--home")) home = NEXT();
         else if (!strcmp(a, "-l") || !strcmp(a, "--load")) { if (nscripts < 64) scripts[nscripts++] = NEXT(); }
@@ -467,8 +481,15 @@ int main(int argc, char **argv) {
     amber_release(res);
 
     for (i = 0; i < nscripts; i++) {
-        char expr[4096];
-        snprintf(expr, sizeof expr, ".[{. `c$1:x};,\"%s\";{'x}]", scripts[i]);
+        char expr[4200];
+        /* through the engine's own loader, as at the prompt: bare qSQL, queries over
+         * several lines, .q scripts and CRLF files all load as they do there (and a
+         * path with a quote in it no longer breaks the line it was pasted into) */
+        if (strchr(scripts[i], '\n') || strlen(scripts[i]) > 4096 || access(scripts[i], R_OK) != 0) {
+            fprintf(stderr, "amberd: cannot read script '%s'\n", scripts[i]);
+            return 1;
+        }
+        snprintf(expr, sizeof expr, "\\l %s", scripts[i]);
         res = amber_eval_str(expr);
         if (!res) { fprintf(stderr, "amberd: loading %s: %s\n", scripts[i], amber_last_error()); return 1; }
         amber_release(res);
@@ -491,7 +512,10 @@ int main(int argc, char **argv) {
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
     addr.sin_port = htons((unsigned short)port);
-    addr.sin_addr.s_addr = inet_addr(strcmp(bind_addr, "localhost") ? bind_addr : "127.0.0.1");
+    if (inet_pton(AF_INET, strcmp(bind_addr, "localhost") ? bind_addr : "127.0.0.1", &addr.sin_addr) != 1) {
+        fprintf(stderr, "amberd: '%s' is not an IPv4 address\n", bind_addr);   /* inet_addr made it 255.255.255.255 */
+        return 2;
+    }
     if (bind(listener, (struct sockaddr *)&addr, sizeof addr) < 0) { perror("amberd: bind"); return 1; }
     if (listen(listener, 64) < 0) { perror("amberd: listen"); return 1; }
 
@@ -523,7 +547,11 @@ int main(int argc, char **argv) {
                     write_all(fd, busy, strlen(busy));
                     close(fd);
                 } else {
+                    struct timeval tv = { 30, 0 };
                     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+                    /* a client that stops reading its replies must not stall everyone: a
+                     * write that cannot move for 30 s fails, and drops that client */
+                    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
                     clients[nclients].fd = fd;
                     clients[nclients].mode = default_mode;
                     clients[nclients].buf = 0;

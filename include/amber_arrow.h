@@ -40,7 +40,7 @@
 extern "C" {
 #endif
 
-#define AMBER_ARROW_ABI 1
+#define AMBER_ARROW_ABI 2
 
 /* The batch size used when a caller passes 0. 65,536 rows is the figure the
  * Arrow ecosystem has converged on for streaming: large enough that per-batch
@@ -66,14 +66,16 @@ int amber_arrow_stream_table(amber_value table, long long batch_rows, void *out_
 int amber_arrow_stream_query(const char *query, long long batch_rows, void *out_stream);
 
 /* One-shot export, for callers that want the whole table at once: fills two
- * caller-allocated structs. Equivalent to the engine's own
- * amber_arrow_export_into(), re-exported here so a consumer of this library
- * needs to link only one thing. */
+ * caller-allocated structs, laid out exactly as the stream's batches are (ints
+ * as int64, 0N as null, temporal columns as Arrow's temporal types). */
 int amber_arrow_export_table(amber_value table, void *out_schema, void *out_array);
 
-/* Import an Arrow schema/array pair as an Amber table (copies -- see the note
- * in the engine's src/ar.c on why the inbound direction cannot alias). Returns
- * an OWNED amber_value, or 0 on error. */
+/* Import an Arrow schema/array pair as an Amber table (copies: Amber keeps a
+ * header in front of every vector, so it cannot adopt foreign memory). Both
+ * structs are MOVED in: they are released here, on success and on error.
+ * Any width of int or float, bools, strings (utf8, large, views), dictionaries,
+ * decimals, dates, timestamps, durations and times; offsets and nulls honoured.
+ * Returns an OWNED amber_value, or 0 on error (amber_arrow_last_error()). */
 amber_value amber_arrow_import_table(void *schema, void *array);
 
 /* Drain an ArrowArrayStream produced by ANY Arrow implementation into a single
@@ -81,6 +83,18 @@ amber_value amber_arrow_import_table(void *schema, void *array);
  * amber_arrow_stream_table() and is what lets `amberd` accept an Arrow upload.
  * Returns an OWNED amber_value, or 0 on error. */
 amber_value amber_arrow_import_stream(void *stream);
+
+/* Batches can be released on any thread, and the engine is not thread-safe, so
+ * when the last batch of an export is released on a thread other than the one
+ * that made it, giving its memory back to the engine waits here. Every
+ * amber_arrow_* call drains the wait list first; this drains it on demand and
+ * returns how many exports it freed. Call it from the engine's thread. */
+long amber_arrow_collect(void);
+
+/* 1: always wait for amber_arrow_collect(), even on the exporting thread. For
+ * hosts like Python, where "the engine's thread" is whoever holds a lock (the
+ * GIL) rather than a fixed thread. */
+void amber_arrow_set_deferred(int on);
 
 #ifdef __cplusplus
 }

@@ -1,20 +1,19 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "amber-arrow"
-version = "2.0.0"
+version = "2.9.0"
 description = "Streaming Apache Arrow and Arrow Flight over the Amber columnar time-series engine"
 readme = "README.md"
-requires-python = ">=3.9"
-license = { text = "AGPL-3.0-or-later" }
-authors = [{ name = "the Amber authors" }]
+requires-python = ">=3.10"
+license = "AGPL-3.0-or-later"
+authors = [{ name = "Bonucci Andrea" }]
 keywords = ["amber", "arrow", "flight", "grpc", "columnar", "zero-copy", "time-series"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Financial and Insurance Industry",
-  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
   "Programming Language :: C",
   "Programming Language :: Python :: 3",
   "Topic :: Database :: Database Engines/Servers",
@@ -26,9 +25,9 @@ classifiers = [
 dependencies = ["pyarrow>=12"]
 
 [project.optional-dependencies]
-embedded = ["amber>=2.0.0"]           # the in-process, zero-copy backend
+embedded = ["amber-lang>=2.9"]        # the in-process, zero-copy backend (import amber)
 pandas   = ["pandas>=1.3"]
-dev      = ["pytest>=7", "amber>=2.0.0", "pandas>=1.3"]
+dev      = ["pytest>=7", "amber-lang>=2.9", "pandas>=1.3", "polars>=0.20"]
 
 [project.scripts]
 amber-flight = "amber_flight.__main__:main"

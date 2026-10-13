@@ -80,14 +80,16 @@ git clone https://github.com/BonucciAndrea/amber-arrow
 cd amber-arrow
 ./build.sh --amberd                                       # libamber_arrow.so + amberd
 pip install ./python                                      # amber_arrow + amber_flight
-pip install ../python-amber                               # for the embedded backend
+pip install amber-lang                                    # the engine, for the embedded backend
 ```
 
 ### Pointing the build at the engine
 
 `build.sh` produces `build/libamber_arrow.so` (and, with `--amberd`,
-`build/amberd`). Both link `libamber.so` and nothing else, so the one thing the
-build needs is to find that library:
+`build/amberd`). `amberd` links `libamber.so`. `libamber_arrow.so` deliberately
+does NOT: its `amber_*` calls bind to whichever engine is already in the process
+(see "One engine, not two"), so a C program links both, `-lamber_arrow -lamber`.
+The engine is only needed to build `amberd`:
 
 | variable | meaning | default |
 |---|---|---|
@@ -122,14 +124,14 @@ primitives only, no qSQL and no `gentq`.
 
 ### One engine, not two
 
-`amber_arrow` loads `libamber.so` **from inside the installed `amber` package**,
-with `RTLD_GLOBAL`, before it loads `libamber_arrow.so`. This matters more than it
-looks: if the loader satisfies libamber_arrow's dependency with a *second* copy
-from elsewhere on the search path, you get a second **engine** — two heaps, two
-symbol tables, two global namespaces, and handles from one that are meaningless
-in the other, with no error at any point because nothing is technically wrong.
-The engine records a `SONAME` so an already-loaded copy is recognised and reused;
-this module's job is to make sure the right one is loaded first.
+`amber_arrow` asks python-amber which `libamber` it is actually running
+(`amber._amber.library_path()`), makes that one global, and only then loads
+`libamber_arrow.so` — which has no dependency on libamber of its own, so there is
+nothing for the loader to go looking for. That matters more than it looks: a
+wheel repaired by auditwheel or delocate renames and moves its libamber, and a
+`DT_NEEDED` on `libamber.so` would find a *second* copy somewhere — a second
+**engine**, two heaps, two symbol tables, handles from one meaningless in the
+other, and no error anywhere.
 
 `amber_arrow.library_path()` tells you which one you got.
 
@@ -155,9 +157,23 @@ A keyed result (`select … by sym from t`) is flattened with the grouping colum
 in front. Arrow has no keyed table, and dropping the keys would be worse than
 flattening them.
 
+**What Arrow sees.** Every integer column is `int64` (in Amber `type 1 2 3` is a
+long however narrow it is stored), `0N` is a real null, symbols and lists of
+strings are `utf8`, and dates, months, timestamps, timespans, times, seconds and
+minutes are `date32`, `timestamp[ns]`, `duration[ns]` and `time32`. Floats, longs,
+timespans and times are the engine's own memory; the rest is laid out once.
+
 **The inbound direction copies.** Amber stores a 32-byte object header
 immediately *before* every vector payload, so it cannot adopt a foreign
-allocation as a native column. Outbound is where the volume is.
+allocation as a native column. Any Arrow column comes in: every int and float
+width, bools, utf8 / large / view strings, dictionaries, decimals, dates,
+timestamps (any unit, any zone: as UTC), durations and times, sliced or chunked,
+nulls as Amber's nulls. Nested and binary columns are refused with their name.
+
+**Threads.** Batches can be released on any thread. The engine is not
+thread-safe, so the memory of an export whose last batch went on another thread
+goes back to the engine on the next `amber_arrow` call, or on
+`amber_arrow.collect()`.
 
 ---
 
@@ -292,7 +308,7 @@ concatenation — not an attacker. The real boundary is not exposing the port.
 ./build.sh --amberd                 # builds build/libamber_arrow.so + build/amberd
 export AMBER_HOME=/opt/amber         # the .k standard library (see "Running", above)
 pip install ./python                 # amber_arrow + amber_flight, into a venv
-pip install ../python-amber          # the embedded backend the tests stream through
+pip install amber-lang pytest        # the embedded backend the tests stream through
 python -m pytest tests -q
 ```
 
@@ -301,12 +317,13 @@ each fixture `importorskip`s what it cannot find, so a partial install skips
 rather than fails. If `libamber_arrow.so` is somewhere other than `build/`, point
 `$AMBER_ARROW_LIB` at it.
 
-34 tests, covering: that every batch shares one buffer address and that the
-address is the engine's; that a batch survives its stream's release; that the
-schema handed to a consumer is independent of the stream; the full `amberd`
-protocol against a real server on a real socket, including that two connections
-see each other's writes; and Flight discovery, streaming, upload and actions
-against a real gRPC server.
+132 tests, covering: every Amber type out and every Arrow type in, with exact
+values and nulls; that every batch shares one buffer address and that the address
+is the engine's; batches outliving their stream and released on other threads;
+leaks; that only one engine is ever loaded; the full `amberd` protocol and its
+read-only guard, limits and bad clients against a real server on a real socket;
+and Flight discovery, streaming, upload, actions and concurrent clients against a
+real gRPC server.
 
 ---
 

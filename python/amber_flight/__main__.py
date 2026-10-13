@@ -25,6 +25,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="run EXPR at startup (repeatable), e.g. --eval 'gentq 10000000'")
     p.add_argument("--i-know-this-is-unauthenticated", action="store_true", dest="public")
     args = p.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        p.error(f"--port {args.port}: not a port")
+    if args.batch_rows < 1:
+        p.error("--batch-rows must be at least 1")
 
     if args.host not in ("127.0.0.1", "localhost") and not args.public:
         print("amber-flight: refusing to bind a non-loopback address without "

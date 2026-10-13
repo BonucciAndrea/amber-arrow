@@ -48,7 +48,7 @@ def test_bare_qsql_works_verbatim(client):
 
 
 def test_errors_carry_the_engine_diagnostic(client):
-    with pytest.raises(AmberRemoteError, match="value"):
+    with pytest.raises(AmberRemoteError, match="noSuchGlobal|parseSideEffect"):
         client.text("noSuchGlobal+1")
 
 
@@ -101,5 +101,5 @@ def test_parse_does_not_evaluate(client):
     with pytest.raises(AmberRemoteError):
         client.text("parseSideEffect")            # not defined yet
     client.request("\\parse parseSideEffect:999")  # would define it if it ran
-    with pytest.raises(AmberRemoteError, match="value"):
+    with pytest.raises(AmberRemoteError, match="noSuchGlobal|parseSideEffect"):
         client.text("parseSideEffect")            # still not defined

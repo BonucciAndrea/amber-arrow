@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.9.0
+
+- **Arrow sees Amber's types now**: every int goes out as int64 (a byte column went out as uint8, so -1 read 255),
+  0N is a real null, and dates, months, timestamps, timespans, times, seconds and minutes go out as Arrow's own
+  temporal types. Tables with those used to fail to export at all.
+- **Any Arrow table comes in**: every int and float width, decimals, dictionaries, string views, every temporal
+  type, sliced and chunked data, nulls. The engine's importer read a float32 as 8-byte ints, past the end of its
+  buffer, and ignored offsets, so a slice came in as the wrong rows. Nested and binary columns say so.
+- **A stream comes in once**: 500 batches cost one copy into the engine, not 500 concatenations.
+- **One engine, always**: libamber_arrow no longer links libamber, and finds the one python-amber is running, so
+  a repaired wheel can't drag in a second engine.
+- **Threads**: refcounts are atomic and the engine is only touched from the engine's side, so PyArrow and gRPC can
+  release batches on any thread.
+- **amberd**: `--readonly` stopped refusing every `select` with a named column, a 600 KB query isn't refused any
+  more, a client that stops reading gets dropped after 30 s instead of stalling everyone, `--load` goes through
+  the real loader (`.q`, multi-line qSQL, CRLF), and bad ports and addresses fail at startup.
+- **amber-flight**: the same read-only rule as amberd, engine errors come back with their text, upload names are
+  checked, and concurrent clients are serialised around the engine.
+- 132 tests, up from 34.
+
 ## 2.0.0 — first release
 
 Streaming Apache Arrow over the Amber engine, the `amberd` query server, and an Arrow Flight daemon.
